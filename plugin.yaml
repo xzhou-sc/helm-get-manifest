@@ -4,7 +4,7 @@ name: "get-manifest"
 version: "0.1.0"
 runtime: subprocess
 config:
-  usage: "get-manifest RELEASE [--source SOURCE] [--clean] [--list-sources]"
+  usage: "get-manifest RELEASE [SOURCE] [flags]"
   shortHelp: "Filter the rendered manifest stored for an installed release by its source template"
   longHelp: |
     helm get-manifest filters the rendered manifest stored for an installed
@@ -15,22 +15,26 @@ config:
     Nothing is re-rendered, so it works when the local chart is unavailable or
     has moved on, and it can inspect any stored revision.
 
+    SOURCE may be the full path Helm records, or any trailing part of it that
+    is unambiguous, so "deployment" or "deployment.yaml" resolves
+    "my-chart/templates/deployment.yaml". The .yaml/.yml extension is
+    optional, since charts are inconsistent about which spelling they use.
+
     Flags:
-          --source SOURCE        only emit documents rendered from SOURCE,
-                                 matched exactly against the "# Source:" annotation
-          --clean                strip Helm source comments and the leading
-                                 document separator, for piping into yq/kubectl
-          --list-sources         list the distinct sources, one per line
-          --revision int         inspect a specific stored revision
-      -n, --namespace string     namespace scope for this request
-          --kube-context string  name of the kubeconfig context to use
+      -s, --source SOURCE         same as passing SOURCE positionally
+      -c, --clean                 strip Helm source comments and the leading
+                                  document separator, for piping into yq/kubectl
+      -l, --list                  list the distinct sources, one per line
+      -r, --revision int          inspect a specific stored revision
+      -n, --namespace string      namespace scope for this request
+      -k, --kube-context string   name of the kubeconfig context to use
 
     Examples:
       helm get-manifest my-release
-      helm get-manifest my-release --source my-chart/templates/deployment.yaml
-      helm get-manifest my-release --source my-chart/templates/deployment.yaml --clean | yq '.spec'
-      helm get-manifest my-release --revision 12 --source my-chart/templates/deployment.yaml
-      helm get-manifest my-release --list-sources | fzf
+      helm get-manifest my-release deployment
+      helm get-manifest my-release deployment.yaml -c | yq '.spec'
+      helm get-manifest my-release deployment.yaml -r 12
+      helm get-manifest my-release -l | fzf
 runtimeConfig:
   platformCommand:
     - command: "${HELM_PLUGIN_DIR}/bin/get-manifest"

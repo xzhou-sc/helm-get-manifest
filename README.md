@@ -6,10 +6,7 @@ It adds source-aware querying similar to `helm template --show-only`, but operat
 `helm get manifest` output rather than re-rendering the chart.
 
 ```bash
-helm get-manifest my-release \
-  --source my-chart/templates/deployment.yaml \
-  --clean |
-yq '.spec'
+helm get-manifest my-release deployment.yaml --clean | yq '.spec'
 ```
 
 ## Why
@@ -40,17 +37,20 @@ Go is required: the plugin builds its binary at install time.
 ## Usage
 
 ```
-helm get-manifest RELEASE [flags]
+helm get-manifest RELEASE [SOURCE] [flags]
 ```
+
+`SOURCE` selects the documents one template produced. Pass it positionally, right after
+the release name.
 
 | Flag | Description |
 | --- | --- |
-| `--source SOURCE` | Only emit documents rendered from `SOURCE`, matched exactly against the `# Source:` annotation. |
-| `--clean` | Strip Helm source comments and the leading document separator, for piping. |
-| `--list-sources` | List the distinct sources, one per line. |
-| `--revision N` | Inspect a specific stored revision. |
+| `-s`, `--source SOURCE` | Same as passing `SOURCE` positionally. |
+| `-c`, `--clean` | Strip Helm source comments and the leading document separator, for piping. |
+| `-l`, `--list` | List the distinct sources, one per line. |
+| `-r`, `--revision N` | Inspect a specific stored revision. |
 | `-n`, `--namespace` | Namespace scope for this request. |
-| `--kube-context` | Name of the kubeconfig context to use. |
+| `-k`, `--kube-context` | Name of the kubeconfig context to use. |
 
 Namespace and context default to the ones Helm was invoked with, so the plugin resolves
 the same release `helm get manifest` would.
@@ -66,52 +66,70 @@ helm get-manifest my-release
 Just the documents one template produced:
 
 ```bash
-helm get-manifest my-release --source my-chart/templates/deployment.yaml
+helm get-manifest my-release deployment.yaml
 ```
 
 Pipe-friendly output:
 
 ```bash
-helm get-manifest my-release --source my-chart/templates/deployment.yaml --clean |
-  yq '.spec.template.spec.containers'
-
-helm get-manifest my-release --source my-chart/templates/deployment.yaml --clean |
-  kubectl diff -f -
+helm get-manifest my-release deployment.yaml -c | yq '.spec.template.spec.containers'
+helm get-manifest my-release deployment.yaml -c | kubectl diff -f -
 ```
 
 Find the source you want:
 
 ```bash
-helm get-manifest my-release --list-sources | grep secret
-helm get-manifest my-release --list-sources | fzf
+helm get-manifest my-release -l | grep secret
+helm get-manifest my-release -l | fzf
 ```
 
 Inspect a past revision:
 
 ```bash
-helm get-manifest my-release --revision 12 --source my-chart/templates/deployment.yaml
+helm get-manifest my-release deployment.yaml -r 12
 ```
 
 ### Source paths
 
-Sources are matched exactly, as Helm writes them. For subcharts that includes the full
-chart path, so a parent and a subchart template of the same name stay distinct:
+A source can be given as the full path Helm records, or as any trailing part of it that
+is unambiguous. The `.yaml`/`.yml` extension can be left off, since charts are
+inconsistent about which they use:
+
+```bash
+helm get-manifest my-release deployment
+helm get-manifest my-release deployment.yaml
+helm get-manifest my-release templates/deployment.yaml
+helm get-manifest my-release my-chart/templates/deployment.yaml
+```
+
+Suffixes match whole path elements, so `config` does not match `external-config.yaml`.
+An exact path always wins, so a full path is never ambiguous. An extension you do type
+is respected: `service.yaml` will not match `service.yml`.
+
+Charts often reuse template names across subcharts. When a shorthand matches more than
+one source, the plugin says so rather than picking one — add enough leading path to make
+it unique:
 
 ```
-my-chart/templates/secret.yaml
-my-chart/charts/sub/templates/secret.yaml
-```
+$ helm get-manifest my-release secret.yaml
+helm get-manifest: source is ambiguous: secret.yaml
 
-Use `--list-sources` to see the exact strings. If an exact match fails, near matches are
-suggested on stderr:
-
-```
-$ helm get-manifest my-release --source secret.yaml
-helm get-manifest: source not found: secret.yaml
-
-available matches:
+matches:
   my-chart/templates/secret.yaml
   my-chart/charts/sub/templates/secret.yaml
+
+$ helm get-manifest my-release sub/templates/secret.yaml   # resolves
+```
+
+Use `-l` to see the exact strings. If nothing matches, near matches are suggested on
+stderr:
+
+```
+$ helm get-manifest my-release wrong-chart/templates/configmap.yaml
+helm get-manifest: source not found: wrong-chart/templates/configmap.yaml
+
+available matches:
+  my-chart/templates/configmap.yaml
 ```
 
 ## Behaviour
@@ -161,6 +179,7 @@ pipe (`| head`) exits quietly.
 | `2` | Invalid usage. |
 | `3` | Helm failed to return the release manifest. |
 | `4` | The requested source was not found. |
+| `5` | The requested source was ambiguous. |
 
 ## Development
 

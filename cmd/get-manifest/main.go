@@ -25,31 +25,38 @@ const (
 	exitUsage        = 2
 	exitHelmFailed   = 3
 	exitSourceNotFnd = 4
+	exitAmbiguous    = 5
 )
 
 const usage = `helm get-manifest filters the rendered manifest stored for an installed
 Helm release, selecting documents by the template that produced them.
 
 Usage:
-  helm get-manifest RELEASE [flags]
+  helm get-manifest RELEASE [SOURCE] [flags]
+
+SOURCE selects the documents rendered from one template. It may be the full
+path Helm records, or any trailing part of it that is unambiguous, so
+"deployment" or "deployment.yaml" resolves
+"my-chart/templates/deployment.yaml". The .yaml/.yml extension is optional.
 
 Flags:
-      --source SOURCE     only emit documents rendered from SOURCE, matched
-                          exactly against the "# Source:" annotation
-      --clean             strip Helm source comments and the leading document
-                          separator, keeping separators between documents
-      --list-sources      list the distinct sources in the manifest, one per line
-      --revision int      inspect a specific stored revision
-  -n, --namespace string  namespace scope for this request
-      --kube-context string  name of the kubeconfig context to use
-  -h, --help              show this help
+  -s, --source SOURCE         same as passing SOURCE positionally
+  -c, --clean                 strip Helm source comments and the leading
+                              document separator, keeping separators between
+                              multiple documents
+  -l, --list                  list the distinct sources, one per line
+  -r, --revision int          inspect a specific stored revision
+  -n, --namespace string      namespace scope for this request
+  -k, --kube-context string   name of the kubeconfig context to use
+  -h, --help                  show this help
 
 Examples:
   helm get-manifest my-release
-  helm get-manifest my-release --source my-chart/templates/deployment.yaml
-  helm get-manifest my-release --source my-chart/templates/deployment.yaml --clean | yq '.spec'
-  helm get-manifest my-release --revision 12 --source my-chart/templates/deployment.yaml
-  helm get-manifest my-release --list-sources | fzf
+  helm get-manifest my-release deployment
+  helm get-manifest my-release my-chart/templates/deployment.yaml
+  helm get-manifest my-release deployment -c | yq '.spec'
+  helm get-manifest my-release deployment -r 12
+  helm get-manifest my-release -l | fzf
 `
 
 type options struct {
@@ -100,11 +107,18 @@ func run(opts *options, out *os.File) (int, error) {
 	}
 
 	if opts.source != "" {
-		selected := manifest.Select(docs, opts.source)
-		if len(selected) == 0 {
+		source, err := manifest.Resolve(docs, opts.source)
+		var ambiguous *manifest.ErrAmbiguous
+		switch {
+		case errors.As(err, &ambiguous):
+			return exitAmbiguous, fmt.Errorf("%w\n\nmatches:\n  %s",
+				err, strings.Join(ambiguous.Matches, "\n  "))
+		case err != nil:
+			return exitSourceNotFnd, err
+		case source == "":
 			return exitSourceNotFnd, sourceNotFound(docs, opts.source)
 		}
-		docs = selected
+		docs = manifest.Select(docs, source)
 	}
 
 	fmt.Fprint(out, manifest.Render(docs, opts.clean))
@@ -189,26 +203,34 @@ func parseArgs(args []string) (*options, error) {
 		switch name {
 		case "-h", "--help":
 			return nil, errHelp
-		case "--clean":
+		case "-c", "--clean":
 			opts.clean = true
-		case "--list-sources":
+		case "-l", "--list":
 			opts.listSources = true
-		case "--source":
+		case "-s", "--source":
+			if opts.source != "" {
+				return nil, errors.New("source given twice")
+			}
 			opts.source, err = value()
-		case "--revision":
+		case "-r", "--revision":
 			opts.revision, err = value()
 		case "-n", "--namespace":
 			opts.namespace, err = value()
-		case "--kube-context":
+		case "-k", "--kube-context":
 			opts.kubeContext, err = value()
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return nil, fmt.Errorf("unknown flag: %s", name)
 			}
-			if opts.release != "" {
-				return nil, fmt.Errorf("unexpected argument: %s", arg)
+			// RELEASE first, then an optional SOURCE.
+			switch {
+			case opts.release == "":
+				opts.release = arg
+			case opts.source == "":
+				opts.source = arg
+			default:
+				return nil, fmt.Errorf("unexpected argument: %s (source given twice?)", arg)
 			}
-			opts.release = arg
 		}
 		if err != nil {
 			return nil, err
@@ -219,7 +241,7 @@ func parseArgs(args []string) (*options, error) {
 		return nil, errors.New("a release name is required")
 	}
 	if opts.listSources && opts.source != "" {
-		return nil, errors.New("--list-sources and --source are mutually exclusive")
+		return nil, errors.New("--list and a source are mutually exclusive")
 	}
 	return opts, nil
 }

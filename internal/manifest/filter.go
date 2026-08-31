@@ -28,6 +28,76 @@ func Select(docs []Doc, source string) []Doc {
 	return out
 }
 
+// ErrAmbiguous reports a shorthand source that resolved to more than one
+// template. It carries the candidates so the caller can show them.
+type ErrAmbiguous struct {
+	Want    string
+	Matches []string
+}
+
+func (e *ErrAmbiguous) Error() string {
+	return "source is ambiguous: " + e.Want
+}
+
+// Resolve maps a source argument to exactly one source present in the
+// manifest.
+//
+// An exact match always wins, so a full path is never ambiguous even when it
+// is also a suffix of a longer one. Otherwise the argument is matched as a
+// trailing path suffix: "external-config.yaml" finds
+// "demo/charts/sub/templates/external-config.yaml".
+//
+// The extension may be left off, since charts are inconsistent about .yaml and
+// .yml: "external-config" matches either spelling. Matching is otherwise on
+// whole path elements, so "config" does not match "external-config.yaml".
+//
+// Resolving to several sources is an error rather than an arbitrary choice.
+func Resolve(docs []Doc, want string) (string, error) {
+	sources := Sources(docs)
+
+	for _, s := range sources {
+		if s == want {
+			return s, nil
+		}
+	}
+
+	// Match the argument as given. If it carries no YAML extension, both
+	// spellings are tried together, so a name matching one template's .yaml
+	// and another's .yml is reported as ambiguous rather than picked.
+	suffixes := []string{want}
+	if ext := pathExt(want); ext != ".yaml" && ext != ".yml" {
+		suffixes = []string{want + ".yaml", want + ".yml"}
+	}
+
+	var matches []string
+	for _, s := range sources {
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(s, "/"+suffix) {
+				matches = append(matches, s)
+				break
+			}
+		}
+	}
+
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return "", nil // caller reports "not found" with its own suggestions
+	default:
+		return "", &ErrAmbiguous{Want: want, Matches: matches}
+	}
+}
+
+// pathExt returns the extension of the last path element, or "" if it has none.
+func pathExt(p string) string {
+	base := p[strings.LastIndex(p, "/")+1:]
+	if i := strings.LastIndex(base, "."); i >= 0 {
+		return base[i:]
+	}
+	return ""
+}
+
 // Render writes documents back out as a YAML stream.
 //
 // Without clean, output matches Helm's own shape: each document preceded by a
@@ -81,12 +151,17 @@ func dropSourceComment(d Doc) string {
 }
 
 // Candidates returns sources whose last path element matches that of want, to
-// suggest alternatives when an exact match fails.
+// suggest alternatives when Resolve finds nothing. This catches a source typed
+// with the wrong directory, which suffix matching cannot resolve on its own.
 func Candidates(docs []Doc, want string) []string {
 	base := want[strings.LastIndex(want, "/")+1:]
+	stem := strings.TrimSuffix(strings.TrimSuffix(base, ".yaml"), ".yml")
+
 	var out []string
 	for _, s := range Sources(docs) {
-		if s[strings.LastIndex(s, "/")+1:] == base || strings.HasSuffix(s, want) {
+		sBase := s[strings.LastIndex(s, "/")+1:]
+		sStem := strings.TrimSuffix(strings.TrimSuffix(sBase, ".yaml"), ".yml")
+		if sStem == stem || strings.HasSuffix(s, want) {
 			out = append(out, s)
 		}
 	}

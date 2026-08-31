@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -284,5 +285,105 @@ func TestCandidates(t *testing.T) {
 	}
 	if c := Candidates(docs, "nothing-alike.yaml"); len(c) != 0 {
 		t.Errorf("Candidates() = %v, want none", c)
+	}
+}
+
+func TestResolve(t *testing.T) {
+	in := "---\n# Source: demo/templates/configmap.yaml\nkind: A\n" +
+		"---\n# Source: demo/templates/secret.yaml\nkind: B\n" +
+		"---\n# Source: demo/charts/sub/templates/secret.yaml\nkind: C\n" +
+		"---\n# Source: demo/templates/external-config.yaml\nkind: D\n"
+	docs := Split(in)
+
+	tests := []struct {
+		name string
+		want string
+		in   string
+	}{
+		{"exact path", "demo/templates/configmap.yaml", "demo/templates/configmap.yaml"},
+		{"bare filename", "demo/templates/configmap.yaml", "configmap.yaml"},
+		{"partial path", "demo/templates/configmap.yaml", "templates/configmap.yaml"},
+		{"disambiguating suffix", "demo/charts/sub/templates/secret.yaml", "sub/templates/secret.yaml"},
+		// An exact match wins even though this is also a suffix of the
+		// subchart's path, so a full path is never ambiguous.
+		{"exact beats suffix", "demo/templates/secret.yaml", "demo/templates/secret.yaml"},
+		// Suffixes match whole path elements only.
+		{"partial element does not match", "", "config.yaml"},
+		{"unknown", "", "nope.yaml"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Resolve(docs, tt.in)
+			if err != nil {
+				t.Fatalf("Resolve(%q) returned error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("Resolve(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveAmbiguous(t *testing.T) {
+	in := "---\n# Source: demo/templates/secret.yaml\nkind: A\n" +
+		"---\n# Source: demo/charts/sub/templates/secret.yaml\nkind: B\n"
+
+	_, err := Resolve(Split(in), "secret.yaml")
+	var ambiguous *ErrAmbiguous
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("Resolve() error = %v, want *ErrAmbiguous", err)
+	}
+	if len(ambiguous.Matches) != 2 {
+		t.Errorf("Matches = %v, want both candidates", ambiguous.Matches)
+	}
+}
+
+// TestResolveWithoutExtension covers charts that spell templates .yaml or .yml
+// inconsistently: the extension may be left off entirely.
+func TestResolveWithoutExtension(t *testing.T) {
+	in := "---\n# Source: demo/templates/configmap.yaml\nkind: A\n" +
+		"---\n# Source: demo/templates/service.yml\nkind: B\n" +
+		"---\n# Source: demo/templates/external-config.yaml\nkind: C\n"
+	docs := Split(in)
+
+	tests := []struct{ in, want string }{
+		{"configmap", "demo/templates/configmap.yaml"},
+		{"service", "demo/templates/service.yml"}, // .yml found without asking
+		{"external-config", "demo/templates/external-config.yaml"},
+		{"templates/configmap", "demo/templates/configmap.yaml"},
+		// An explicit extension is never widened to the other spelling.
+		{"service.yaml", ""},
+		{"configmap.yml", ""},
+		// Whole-element matching still applies to the stem.
+		{"config", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := Resolve(docs, tt.in)
+			if err != nil {
+				t.Fatalf("Resolve(%q) returned error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("Resolve(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveExtensionAmbiguity checks that a bare name matching one template's
+// .yaml and another's .yml is reported rather than silently resolved.
+func TestResolveExtensionAmbiguity(t *testing.T) {
+	in := "---\n# Source: demo/templates/config.yaml\nkind: A\n" +
+		"---\n# Source: demo/charts/sub/templates/config.yml\nkind: B\n"
+
+	_, err := Resolve(Split(in), "config")
+	var ambiguous *ErrAmbiguous
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("Resolve() error = %v, want *ErrAmbiguous", err)
+	}
+	if len(ambiguous.Matches) != 2 {
+		t.Errorf("Matches = %v, want both spellings", ambiguous.Matches)
 	}
 }

@@ -191,7 +191,7 @@ func TestListSources(t *testing.T) {
 	plugin := buildPlugin(t)
 	helm, _ := fakeHelm(t, readFixture(t))
 
-	got := runPlugin(t, plugin, helm, "demo", "--list-sources")
+	got := runPlugin(t, plugin, helm, "demo", "--list")
 	want := strings.Join([]string{
 		"demo/templates/configmap.yaml",
 		"demo/templates/service.yaml",
@@ -202,6 +202,200 @@ func TestListSources(t *testing.T) {
 	}, "\n") + "\n"
 	if got.stdout != want {
 		t.Errorf("stdout =\n%s\nwant\n%s", got.stdout, want)
+	}
+}
+
+// TestPositionalSource checks that SOURCE can follow RELEASE directly, which
+// is the common invocation.
+func TestPositionalSource(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, readFixture(t))
+
+	positional := runPlugin(t, plugin, helm, "demo", "demo/templates/service.yaml")
+	if positional.code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr: %s)", positional.code, positional.stderr)
+	}
+	flagged := runPlugin(t, plugin, helm, "demo", "--source", "demo/templates/service.yaml")
+	if positional.stdout != flagged.stdout {
+		t.Errorf("positional and --source disagree:\n%q\nvs\n%q", positional.stdout, flagged.stdout)
+	}
+	if !strings.Contains(positional.stdout, "kind: Service") {
+		t.Errorf("wrong document selected:\n%s", positional.stdout)
+	}
+}
+
+// TestPositionalSourceWithFlags checks a source positioned among flags, since
+// the release and source are not required to come first.
+func TestPositionalSourceWithFlags(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, readFixture(t))
+
+	got := runPlugin(t, plugin, helm, "demo", "-n", "prod", "configmap.yaml", "--clean")
+	if got.code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr: %s)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "name: demo-config") {
+		t.Errorf("wrong document selected:\n%s", got.stdout)
+	}
+}
+
+// TestSuffixMatching checks that a trailing part of a source resolves, so a
+// bare filename is enough when it is unambiguous.
+func TestSuffixMatching(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, readFixture(t))
+
+	for _, short := range []string{
+		"configmap.yaml",
+		"templates/configmap.yaml",
+		"demo/templates/configmap.yaml",
+	} {
+		got := runPlugin(t, plugin, helm, "demo", short, "--clean")
+		if got.code != exitOK {
+			t.Fatalf("%q: exit = %d (stderr: %s)", short, got.code, got.stderr)
+		}
+		if !strings.Contains(got.stdout, "name: demo-config") {
+			t.Errorf("%q selected the wrong document:\n%s", short, got.stdout)
+		}
+	}
+}
+
+// TestExtensionOptional checks that the .yaml/.yml extension can be omitted,
+// since charts are inconsistent about which spelling they use.
+func TestExtensionOptional(t *testing.T) {
+	plugin := buildPlugin(t)
+	// A chart mixing both spellings.
+	helm, _ := fakeHelm(t,
+		"---\n# Source: demo/templates/configmap.yaml\nkind: ConfigMap\nmetadata:\n  name: from-yaml\n"+
+			"---\n# Source: demo/templates/service.yml\nkind: Service\nmetadata:\n  name: from-yml\n")
+
+	for _, tc := range []struct{ source, wantName string }{
+		{"configmap", "from-yaml"},
+		{"service", "from-yml"},
+		{"configmap.yaml", "from-yaml"}, // explicit still works
+		{"service.yml", "from-yml"},
+	} {
+		got := runPlugin(t, plugin, helm, "demo", tc.source, "--clean")
+		if got.code != exitOK {
+			t.Fatalf("%q: exit = %d (stderr: %s)", tc.source, got.code, got.stderr)
+		}
+		if !strings.Contains(got.stdout, "name: "+tc.wantName) {
+			t.Errorf("%q selected the wrong document:\n%s", tc.source, got.stdout)
+		}
+	}
+}
+
+// TestSuffixMatchesWholeElements guards against a suffix matching mid-element,
+// where "config.yaml" must not resolve "external-config.yaml".
+func TestSuffixMatchesWholeElements(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, "---\n# Source: demo/templates/external-config.yaml\nkind: ConfigMap\n")
+
+	got := runPlugin(t, plugin, helm, "demo", "config.yaml")
+	if got.code != exitSourceNotFnd {
+		t.Errorf("exit = %d, want %d: a partial element must not match", got.code, exitSourceNotFnd)
+	}
+}
+
+// TestExactMatchBeatsSuffix checks that a full path is never ambiguous, even
+// when it is also a suffix of a longer source.
+func TestExactMatchBeatsSuffix(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, readFixture(t))
+
+	got := runPlugin(t, plugin, helm, "demo", "demo/templates/secret.yaml", "--clean")
+	if got.code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr: %s)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "name: parent-secret") {
+		t.Errorf("exact path should select the parent's secret:\n%s", got.stdout)
+	}
+}
+
+// TestAmbiguousSource checks that a shorthand matching several templates is an
+// error listing the candidates, never an arbitrary pick.
+func TestAmbiguousSource(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, readFixture(t))
+
+	got := runPlugin(t, plugin, helm, "demo", "secret.yaml")
+	if got.code != exitAmbiguous {
+		t.Errorf("exit = %d, want %d", got.code, exitAmbiguous)
+	}
+	if got.stdout != "" {
+		t.Errorf("stdout should stay empty on error, got %q", got.stdout)
+	}
+	if !strings.Contains(got.stderr, "ambiguous") {
+		t.Errorf("stderr = %q, want an ambiguity message", got.stderr)
+	}
+	for _, want := range []string{
+		"demo/templates/secret.yaml",
+		"demo/charts/sub/templates/secret.yaml",
+	} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr should list %s:\n%s", want, got.stderr)
+		}
+	}
+}
+
+// TestAmbiguityResolvedByLongerSuffix checks the documented escape hatch.
+func TestAmbiguityResolvedByLongerSuffix(t *testing.T) {
+	plugin := buildPlugin(t)
+	helm, _ := fakeHelm(t, readFixture(t))
+
+	got := runPlugin(t, plugin, helm, "demo", "sub/templates/secret.yaml", "--clean")
+	if got.code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr: %s)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "name: sub-secret") {
+		t.Errorf("wrong document selected:\n%s", got.stdout)
+	}
+}
+
+// TestShortFlags checks that each shorthand behaves exactly like its long form.
+func TestShortFlags(t *testing.T) {
+	plugin := buildPlugin(t)
+
+	tests := []struct {
+		name  string
+		short []string
+		long  []string
+	}{
+		{"list", []string{"demo", "-l"}, []string{"demo", "--list"}},
+		{"clean", []string{"demo", "configmap.yaml", "-c"}, []string{"demo", "configmap.yaml", "--clean"}},
+		{"source", []string{"demo", "-s", "configmap.yaml"}, []string{"demo", "--source", "configmap.yaml"}},
+		{"revision", []string{"demo", "-r", "3"}, []string{"demo", "--revision", "3"}},
+		{"kube context", []string{"demo", "-k", "ctx"}, []string{"demo", "--kube-context", "ctx"}},
+		{"namespace", []string{"demo", "-n", "prod"}, []string{"demo", "--namespace", "prod"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shortHelm, shortArgs := fakeHelm(t, readFixture(t))
+			longHelm, longArgs := fakeHelm(t, readFixture(t))
+
+			short := runPlugin(t, plugin, shortHelm, tt.short...)
+			long := runPlugin(t, plugin, longHelm, tt.long...)
+
+			if short.code != exitOK {
+				t.Fatalf("exit = %d, want 0 (stderr: %s)", short.code, short.stderr)
+			}
+			if short.stdout != long.stdout {
+				t.Errorf("stdout differs:\n%q\nvs\n%q", short.stdout, long.stdout)
+			}
+			// Flags that shape the helm call must forward identically too.
+			gotShort, err := os.ReadFile(shortArgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotLong, err := os.ReadFile(longArgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotShort) != string(gotLong) {
+				t.Errorf("helm called with %q via short form, %q via long", gotShort, gotLong)
+			}
+		})
 	}
 }
 
@@ -222,22 +416,18 @@ func TestSourceNotFound(t *testing.T) {
 }
 
 // TestSourceNotFoundSuggests checks the near-match hint, which is what makes a
-// mistyped bare filename recoverable.
+// mistyped source recoverable. A wrong directory still shares a basename, so
+// suffix matching does not resolve it but the hint can still point at it.
 func TestSourceNotFoundSuggests(t *testing.T) {
 	plugin := buildPlugin(t)
 	helm, _ := fakeHelm(t, readFixture(t))
 
-	got := runPlugin(t, plugin, helm, "demo", "--source", "secret.yaml")
+	got := runPlugin(t, plugin, helm, "demo", "wrong-chart/templates/configmap.yaml")
 	if got.code != exitSourceNotFnd {
-		t.Fatalf("exit = %d, want %d", got.code, exitSourceNotFnd)
+		t.Fatalf("exit = %d, want %d (stderr: %s)", got.code, exitSourceNotFnd, got.stderr)
 	}
-	for _, want := range []string{
-		"demo/templates/secret.yaml",
-		"demo/charts/sub/templates/secret.yaml",
-	} {
-		if !strings.Contains(got.stderr, want) {
-			t.Errorf("stderr should suggest %s:\n%s", want, got.stderr)
-		}
+	if !strings.Contains(got.stderr, "demo/templates/configmap.yaml") {
+		t.Errorf("stderr should suggest the real path:\n%s", got.stderr)
 	}
 }
 
@@ -252,8 +442,10 @@ func TestUsageErrors(t *testing.T) {
 		{"no release", nil},
 		{"unknown flag", []string{"demo", "--nope"}},
 		{"missing flag value", []string{"demo", "--source"}},
-		{"two releases", []string{"demo", "other"}},
-		{"list-sources with source", []string{"demo", "--list-sources", "--source", "x"}},
+		{"list with source flag", []string{"demo", "--list", "--source", "x"}},
+		{"list with positional source", []string{"demo", "x.yaml", "--list"}},
+		{"source given twice", []string{"demo", "a.yaml", "--source", "b.yaml"}},
+		{"three positionals", []string{"demo", "a.yaml", "b.yaml"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := runPlugin(t, plugin, helm, tt.args...)
