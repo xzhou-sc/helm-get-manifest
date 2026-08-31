@@ -1,0 +1,65 @@
+---
+# Source: demo/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-config
+data:
+  greeting: hello
+---
+# Source: demo/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Source: demo/templates/multi.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-a
+data:
+  index: "1"
+---
+# Source: demo/templates/multi.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-b
+data:
+  index: "2"
+---
+# Source: demo/templates/tricky.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tricky
+data:
+  # A document separator inside a block scalar is content, not a boundary.
+  script: |
+    echo start
+    ---
+    echo end
+  # A source marker inside a block scalar is not provenance.
+  decoy: |
+    # Source: fake/templates/nope.yaml
+---
+# Source: demo/charts/sub/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sub-secret
+stringData:
+  key: value
+---
+# Source: demo/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: parent-secret
+stringData:
+  key: value
