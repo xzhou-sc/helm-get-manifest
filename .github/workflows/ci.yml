@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -100,8 +101,33 @@ jobs:
         with:
           version: v4.2.2
 
+      # Mirror what release.yml ships: an assembled plugin directory, not the
+      # checkout. Packaging "." would sweep in .git/ and any local tooling
+      # directories, and would write the archive into the tree being packaged --
+      # tar then reads it as it grows and fails "archive/tar: write too long".
+      - name: Assemble the plugin directory
+        run: |
+          set -euo pipefail
+          staged="${RUNNER_TEMP}/staged/get-manifest"
+          mkdir -p "$staged/bin"
+          cp plugin.yaml README.md LICENSE "$staged/"
+          cp -r scripts "$staged/"
+          # A release ships real binaries; this job only guards the packaging
+          # path, so a placeholder is enough to exercise the tar.
+          touch "$staged/bin/.keep"
+
       - name: Package the plugin
-        run: helm plugin package . --sign=false -d dist/
+        run: |
+          set -euo pipefail
+          helm plugin package "${RUNNER_TEMP}/staged/get-manifest" \
+            --sign=false -d "${RUNNER_TEMP}/dist"
 
       - name: Show the archive
-        run: ls -la dist/
+        run: |
+          set -euo pipefail
+          ls -la "${RUNNER_TEMP}/dist"
+          # Nothing from the checkout's VCS or local tooling may ship.
+          if tar tzf "${RUNNER_TEMP}/dist"/*.tgz | grep -E '/\.(git|claude)/'; then
+            echo "archive contains VCS or local tooling files" >&2
+            exit 1
+          fi

@@ -29,7 +29,15 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 
 mkdir -p bin
+# Build to the platform-suffixed name, because plugin.yaml's platformCommand
+# matches on os/arch before reaching its unsuffixed fallback: on any supported
+# platform Helm looks for bin/get-manifest-${os}-${arch}, never bin/get-manifest.
+out="bin/get-manifest-${os}-${arch}"
+# Not `[ ... ] && out=...`: under `set -e` a false test would end the script.
+if [ "$os" = windows ]; then
+	out="${out}.exe"
+fi
 # -buildvcs=false because the plugin is often built from an extracted tarball,
 # which has no .git directory for the toolchain to stamp from.
-go build -trimpath -buildvcs=false -ldflags="-s -w" -o bin/get-manifest ./cmd/get-manifest
-echo "helm get-manifest: built bin/get-manifest"
+go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$out" ./cmd/get-manifest
+echo "helm get-manifest: built $out"
