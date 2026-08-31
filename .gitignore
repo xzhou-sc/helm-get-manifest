@@ -1,2 +1,17 @@
 bin/
+dist/
 .scratch/
+
+# This checkout shares a directory tree with unrelated dotfiles; keep them out.
+.bash_profile
+.bashrc
+.claude/
+.gitconfig
+.gitmodules
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.vscode
+.zprofile
+.zshrc

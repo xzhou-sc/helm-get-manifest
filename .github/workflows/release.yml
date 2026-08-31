@@ -1,0 +1,108 @@
+name: release
+
+# Tagging v* publishes a release archive holding a binary for every supported
+# platform, so installing the plugin needs no Go toolchain.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.2.2
+
+      - name: Check the tag matches plugin.yaml
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(grep '^version:' plugin.yaml | cut -d'"' -f2)
+          if [ "$tag" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME does not match plugin.yaml version $declared" >&2
+            exit 1
+          fi
+
+      - run: go test ./...
+
+      - name: Cross-compile
+        run: |
+          set -euo pipefail
+          mkdir -p dist/get-manifest/bin
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os=${target%/*}
+            arch=${target#*/}
+            out="dist/get-manifest/bin/get-manifest-${os}-${arch}"
+            [ "$os" = windows ] && out="${out}.exe"
+            echo "building $out"
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 \
+              go build -trimpath -buildvcs=false \
+                -ldflags="-s -w" \
+                -o "$out" ./cmd/get-manifest
+          done
+
+      - name: Assemble the plugin directory
+        run: |
+          set -euo pipefail
+          cp plugin.yaml README.md LICENSE dist/get-manifest/
+          cp -r scripts dist/get-manifest/
+          ls -la dist/get-manifest dist/get-manifest/bin
+
+      # Signing needs a PGP key. Without one, Helm 4 users must pass
+      # --verify=false, so publish signed whenever the secret is configured.
+      - name: Import the signing key
+        id: signing
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "no GPG_PRIVATE_KEY secret; publishing unsigned"
+            exit 0
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          # helm reads a legacy keyring, not the modern keybox.
+          gpg --batch --export-secret-keys > "$HOME/.gnupg/secring.gpg"
+          gpg --batch --export > "$HOME/.gnupg/pubring.gpg"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Package (signed)
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GPG_PASSPHRASE" > /tmp/passphrase
+          helm plugin package dist/get-manifest \
+            --sign \
+            --key "${{ secrets.GPG_KEY_NAME }}" \
+            --keyring "$HOME/.gnupg/secring.gpg" \
+            --passphrase-file /tmp/passphrase \
+            -d dist/
+          rm -f /tmp/passphrase
+
+      - name: Package (unsigned)
+        if: steps.signing.outputs.enabled != 'true'
+        run: helm plugin package dist/get-manifest --sign=false -d dist/
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist/*.tgz dist/*.prov 2>/dev/null || true
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*.tgz $(ls dist/*.prov 2>/dev/null || true)

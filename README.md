@@ -32,7 +32,20 @@ It replaces the usual ad-hoc `awk`/`yq` filter over `# Source:` comments.
 helm plugin install https://github.com/xzhou-sc/helm-get-manifest
 ```
 
-Go is required: the plugin builds its binary at install time.
+Release archives ship a prebuilt binary for Linux, macOS and Windows on amd64 and arm64,
+so no toolchain is needed. Installing from a git checkout instead builds from source and
+requires Go.
+
+### Helm 4 and signature verification
+
+Helm 4 verifies plugin signatures by default, and a git source cannot carry one. If you
+install straight from the repository rather than from a release, skip verification:
+
+```bash
+helm plugin install https://github.com/xzhou-sc/helm-get-manifest --verify=false
+```
+
+Released archives are signed when a signing key is configured, and verify normally.
 
 ## Usage
 
@@ -190,6 +203,22 @@ helm plugin install .
 ```
 
 Parser and CLI tests run from fixtures and need no cluster.
+
+### Releasing
+
+Bump `version` in `plugin.yaml`, then push a matching tag:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The release workflow cross-compiles every platform, packages them with
+`helm plugin package`, and attaches the archive to a GitHub release. It refuses to
+publish if the tag and `plugin.yaml` disagree.
+
+To publish signed archives, set the `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` and
+`GPG_KEY_NAME` repository secrets. Without them the release is published unsigned and
+users need `--verify=false`.
 
 ## License
 

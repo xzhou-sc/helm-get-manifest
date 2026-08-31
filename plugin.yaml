@@ -36,8 +36,28 @@ config:
       helm get-manifest my-release deployment.yaml -r 12
       helm get-manifest my-release -l | fzf
 runtimeConfig:
+  # Release archives ship a binary per platform and Helm picks the matching
+  # one itself, so installing needs no toolchain and no download script. The
+  # last entry has no os/arch and acts as the fallback: it is what a source
+  # checkout uses, where the install hook has built a single local binary.
   platformCommand:
+    - os: linux
+      arch: amd64
+      command: "${HELM_PLUGIN_DIR}/bin/get-manifest-linux-amd64"
+    - os: linux
+      arch: arm64
+      command: "${HELM_PLUGIN_DIR}/bin/get-manifest-linux-arm64"
+    - os: darwin
+      arch: amd64
+      command: "${HELM_PLUGIN_DIR}/bin/get-manifest-darwin-amd64"
+    - os: darwin
+      arch: arm64
+      command: "${HELM_PLUGIN_DIR}/bin/get-manifest-darwin-arm64"
+    - os: windows
+      arch: amd64
+      command: "${HELM_PLUGIN_DIR}/bin/get-manifest-windows-amd64.exe"
     - command: "${HELM_PLUGIN_DIR}/bin/get-manifest"
+  # Building is a no-op when a release archive already supplied the binaries.
   platformHooks:
     install:
       - command: "${HELM_PLUGIN_DIR}/scripts/install.sh"

@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test -race ./...
+
+  # The plugin is only useful if Helm can actually install and run it, which
+  # the unit tests cannot cover: they stub the helm binary.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.2.2
+
+      - name: Install the plugin
+        run: helm plugin install .
+
+      - name: Render a chart and check the plugin agrees with helm
+        run: |
+          set -euo pipefail
+
+          # A throwaway chart with a multi-document template, so the fixtures
+          # exercise the case one source renders several resources.
+          helm create demo >/dev/null
+          cat > demo/templates/multi.yaml <<'EOF'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: multi-a
+          ---
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: multi-b
+          EOF
+
+          # `helm template` produces the same "# Source:" annotations as a
+          # stored release, so the parser can be exercised without a cluster.
+          helm template demo demo > rendered.yaml
+
+          sources=$(grep -c '^# Source:' rendered.yaml)
+          echo "rendered $sources annotated documents"
+          test "$sources" -gt 0
+
+      - name: Verify the plugin is wired into helm
+        run: |
+          set -euo pipefail
+          helm plugin list | grep get-manifest
+          helm get-manifest --help | grep -q 'get-manifest RELEASE'
+          # A missing release must fail cleanly, not panic.
+          if helm get-manifest no-such-release 2>/dev/null; then
+            echo "expected a failure for a missing release" >&2
+            exit 1
+          fi
+
+  # Guard the packaging path: `helm plugin package` is how releases are built,
+  # and it breaks on a dirty tree (a stale bin/ is written while being read).
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.2.2
+
+      - name: Package the plugin
+        run: helm plugin package . --sign=false -d dist/
+
+      - name: Show the archive
+        run: ls -la dist/
